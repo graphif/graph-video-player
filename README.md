@@ -15,13 +15,28 @@
 
 ## 自定义协议格式
 
+### 三斜杠说明
+
+URL 结构为 `scheme://authority/path`。本协议 authority 为空，因此固定是三个斜杠：
+
+| 平台 | 绝对路径示例 | 完整 URL |
+|------|------------|---------|
+| macOS / Linux | `/Users/foo/video.mp4` | `graph-video:///Users/foo/video.mp4` |
+| Windows | `C:\Users\foo\video.mp4` | `graph-video:///C:/Users/foo/video.mp4` |
+
+> Windows 路径需将反斜杠 `\` 改为正斜杠 `/`。Windows 平台的协议注册和路径兼容性尚未完整测试，欢迎反馈。
+
 ### 基础格式
 
+macOS / Linux：
 ```
-graph-video:///绝对路径/视频文件.mp4
+graph-video:///Users/username/Videos/video.mp4
 ```
 
-> 注意：`graph-video://` 后接三个斜杠，第三个斜杠是绝对路径的开头。
+Windows：
+```
+graph-video:///C:/Users/username/Videos/video.mp4
+```
 
 ### 带参数格式
 
