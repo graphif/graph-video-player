@@ -1,51 +1,143 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useRef } from "react";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function parseGraphVideoUrl(url: string): string | null {
+  // graph-video:///absolute/path/to/video.mp4 → /absolute/path/to/video.mp4
+  // macOS may percent-encode the URL, so decode it before returning
+  if (url.startsWith("graph-video://")) {
+    const raw = url.slice("graph-video://".length);
+    try {
+      return decodeURIComponent(raw) || null;
+    } catch {
+      return raw || null;
+    }
   }
+  return null;
+}
+
+/** Convert a native file path to a video-src:// URL served by the Rust custom protocol */
+function makeVideoSrcUrl(path: string): string {
+  // encodeURI keeps / intact but encodes non-ASCII characters (e.g. Chinese)
+  return "video-src://localhost" + encodeURI(path);
+}
+
+function App() {
+  const [videoSrc, setVideoSrc] = useState<string>("");
+  const [videoPath, setVideoPath] = useState<string>("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  const playPath = (path: string) => {
+    const src = makeVideoSrcUrl(path);
+    setVideoPath(path);
+    setVideoSrc(src);
+    setTimeout(() => {
+      videoRef.current?.play().catch(() => {});
+    }, 100);
+  };
+
+  const playFile = (file: File) => {
+    const nativePath = (file as any).path as string | undefined;
+    if (nativePath) {
+      playPath(nativePath);
+    } else {
+      // fallback: blob URL（dev 模式下无原生路径时使用）
+      const blobUrl = URL.createObjectURL(file);
+      setVideoPath(file.name);
+      setVideoSrc(blobUrl);
+    }
+  };
+
+  useEffect(() => {
+    // 处理冷启动：应用由 graph-video:// 协议直接唤起时
+    getCurrent()
+      .then((urls) => {
+        if (urls && urls.length > 0) {
+          const path = parseGraphVideoUrl(urls[0]);
+          if (path) playPath(path);
+        }
+      })
+      .catch(() => {});
+
+    // 处理热启动：应用已在运行时收到 graph-video:// 协议
+    let unlisten: (() => void) | null = null;
+    onOpenUrl((urls) => {
+      if (urls.length > 0) {
+        const path = parseGraphVideoUrl(urls[0]);
+        if (path) playPath(path);
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) playFile(file);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) playFile(file);
+    // reset input so same file can be re-selected
+    e.target.value = "";
+  };
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div
+      className="player-container"
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={handleDrop}
+    >
+      {videoSrc ? (
+        <>
+          <video
+            ref={videoRef}
+            src={videoSrc}
+            controls
+            className="video-player"
+            autoPlay
+          />
+          <div className="video-path" title={videoPath}>
+            <span>{videoPath}</span>
+            <label className="change-btn">
+              更换
+              <input
+                type="file"
+                accept="video/*"
+                hidden
+                onChange={handleFileSelect}
+              />
+            </label>
+          </div>
+        </>
+      ) : (
+        <div className="drop-zone">
+          <div className="drop-content">
+            <div className="icon">▶</div>
+            <p className="title">Graph Video Player</p>
+            <p className="desc">拖拽视频文件到此处播放</p>
+            <label className="file-btn">
+              选择文件
+              <input
+                type="file"
+                accept="video/*"
+                hidden
+                onChange={handleFileSelect}
+              />
+            </label>
+            <p className="hint">或通过 graph-video:///path/to/video 协议唤起</p>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
 export default App;
+
