@@ -40,8 +40,30 @@ function parseTime(s: string): number {
 }
 
 /**
+ * 将 deep link 解析出的路径规范化为 Windows/Unix 可用的绝对路径。
+ * - graph-video:///D:/path → 得到 "/D:/path"，需改为 "D:/path"
+ * - graph-video://D:/path 在部分环境下 ":" 被当 URL 的 host 解析掉，得到 "D/path"，需改为 "D:/path"
+ */
+function normalizeFilePath(path: string): string {
+  if (!path) return path;
+  // 前导斜杠 + Windows 盘符：/D:/... → D:/
+  if (/^\/[A-Za-z]:/.test(path)) {
+    const match = path.match(/^\/([A-Za-z]):(\/.*)?$/);
+    if (match) return match[1] + ":" + (match[2] ?? "/");
+  }
+  // 单字母 + 斜杠（缺冒号）：D/... → D:/
+  const missingColon = /^([A-Za-z])\/(.*)$/;
+  if (missingColon.test(path)) {
+    const match = path.match(/^([A-Za-z])\/(.*)$/);
+    if (match) return match[1] + ":" + "/" + match[2];
+  }
+  return path;
+}
+
+/**
  * 解析 graph-video:// URL，返回 VideoParams。
  * 格式：graph-video:///绝对路径/video.mp4?t=90&speed=1.5&...
+ * 或 graph-video://D:/绝对路径/video.mp4?t=90（Windows 下两斜杠时冒号可能被吞掉）
  */
 function parseGraphVideoUrl(url: string): VideoParams | null {
   if (!url.startsWith("graph-video://")) return null;
@@ -57,6 +79,7 @@ function parseGraphVideoUrl(url: string): VideoParams | null {
     } catch {
       path = rawPath;
     }
+    path = normalizeFilePath(path);
     if (!path) return null;
 
     const params = new URLSearchParams(queryString);
