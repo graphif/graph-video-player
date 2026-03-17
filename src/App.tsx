@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import "./App.css";
 
@@ -118,23 +119,32 @@ function parseGraphVideoUrl(url: string): VideoParams | null {
   }
 }
 
-/** 将原生文件路径转为 video-src:// URL（Rust 自定义协议提供服务） */
-function makeVideoSrcUrl(path: string): string {
-  return "video-src://localhost" + encodeURI(path);
+/**
+ * 通过后端 HTTP 流获取视频 URL。在 Windows 上自定义协议 video-src:// 无法用于 <video src>（ERR_UNKNOWN_URL_SCHEME），
+ * 故统一用本地 HTTP 服务提供视频流，各平台均可正常播放与 seek。
+ */
+async function getVideoStreamUrl(path: string): Promise<string> {
+  return invoke<string>("get_video_stream_url", { path });
 }
 
 function App() {
   const [videoSrc, setVideoSrc] = useState<string>("");
   const [videoParams, setVideoParams] = useState<VideoParams | null>(null);
+  const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const playParams = (params: VideoParams) => {
+    setVideoLoadError(null);
     setVideoParams(params);
-    setVideoSrc(makeVideoSrcUrl(params.path));
-    // 自动播放由 autoPlay 属性触发，参数在 onLoadedMetadata 中应用
+    getVideoStreamUrl(params.path)
+      .then((url) => setVideoSrc(url))
+      .catch((e) =>
+        setVideoLoadError("无法获取视频流: " + (e instanceof Error ? e.message : String(e)))
+      );
   };
 
   const playFile = (file: File) => {
+    setVideoLoadError(null);
     const nativePath = (file as any).path as string | undefined;
     if (nativePath) {
       playParams({ path: nativePath });
@@ -143,6 +153,16 @@ function App() {
       setVideoParams({ path: file.name });
       setVideoSrc(URL.createObjectURL(file));
     }
+  };
+
+  /** 视频加载失败（文件不存在、格式不支持、协议错误等） */
+  const handleVideoError = () => {
+    const path = videoParams?.path ?? "";
+    setVideoLoadError(
+      path
+        ? `无法播放：文件不存在或格式不支持\n${path}`
+        : "无法播放：请检查链接或选择本地文件"
+    );
   };
 
   useEffect(() => {
@@ -223,7 +243,13 @@ function App() {
             autoPlay
             onLoadedMetadata={handleLoadedMetadata}
             onTimeUpdate={handleTimeUpdate}
+            onError={handleVideoError}
           />
+          {videoLoadError && (
+            <div className="video-error" role="alert">
+              {videoLoadError}
+            </div>
+          )}
           <div className="video-path" title={videoParams?.path}>
             <span>{displayTitle}</span>
             <label className="change-btn">
