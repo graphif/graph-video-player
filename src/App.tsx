@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 interface VideoParams {
@@ -95,14 +96,30 @@ function parseGraphVideoUrl(url: string): VideoParams | null {
   }
 }
 
-/** 将原生文件路径转为 video-src:// URL（Rust 自定义协议提供服务） */
+/** 将原生文件路径转为视频 URL（Rust 自定义协议提供服务） */
 function makeVideoSrcUrl(path: string): string {
-  return "video-src://localhost" + encodeURI(path);
+  const encoded = encodeURI(path.replace(/\\/g, "/"));
+  // Windows WebView2 不识别 video-src://，会报 ERR_UNKNOWN_URL_SCHEME；
+  // 需使用 http://video-src.localhost/ 格式，由 Tauri 协议处理器接管
+  const isWindows = /Win|Windows/i.test(navigator.userAgent);
+  if (isWindows) {
+    return "http://video-src.localhost/" + encoded;
+  }
+  return "video-src://localhost/" + encoded;
+}
+
+/** 根据当前路径和秒数生成仅带 t 参数的 graph-video 链接 */
+function buildGraphVideoUrlWithT(path: string, currentTimeSeconds: number): string {
+  const normalizedPath = path.replace(/\\/g, "/");
+  const t = Math.floor(currentTimeSeconds);
+  return `graph-video:///${normalizedPath}?t=${t}`;
 }
 
 function App() {
   const [videoSrc, setVideoSrc] = useState<string>("");
   const [videoParams, setVideoParams] = useState<VideoParams | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const playParams = (params: VideoParams) => {
@@ -116,9 +133,30 @@ function App() {
     if (nativePath) {
       playParams({ path: nativePath });
     } else {
-      // fallback: blob URL（dev 模式下无原生路径时使用）
+      // fallback: blob URL（无原生路径时仅能播放，生成链接会缺绝对路径）
       setVideoParams({ path: file.name });
       setVideoSrc(URL.createObjectURL(file));
+    }
+  };
+
+  /** 通过 Tauri 原生对话框选择视频，得到完整路径，便于生成带绝对路径的 graph-video 链接 */
+  const handleOpenVideoDialog = async () => {
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "视频",
+            extensions: ["mp4", "webm", "mkv", "avi", "mov", "m4v", "ts", "flv"],
+          },
+        ],
+      });
+      if (selected && typeof selected === "string") {
+        playParams({ path: selected });
+      }
+    } catch (_) {
+      // 非 Tauri 环境或用户取消
     }
   };
 
@@ -176,13 +214,42 @@ function App() {
     if (file) playFile(file);
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) playFile(file);
-    e.target.value = "";
-  };
-
   const displayTitle = videoParams?.title ?? videoParams?.path ?? "";
+
+  /** 判断是否为绝对路径（Windows 盘符或以 / 开头） */
+  const isAbsolutePath = (p: string) =>
+    /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/");
+
+  const handleCopyCurrentLink = async () => {
+    const video = videoRef.current;
+    if (!video || !videoParams?.path) return;
+    if (!isAbsolutePath(videoParams.path)) {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast("请使用「选择文件」或「更换」选择视频以生成带完整路径的链接");
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, 3000);
+      return;
+    }
+    const url = buildGraphVideoUrlWithT(videoParams.path, video.currentTime);
+    try {
+      await navigator.clipboard.writeText(url);
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast("链接已复制到剪贴板");
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, 2500);
+    } catch {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToast("复制失败");
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, 2500);
+    }
+  };
 
   return (
     <div
@@ -203,16 +270,18 @@ function App() {
           />
           <div className="video-path" title={videoParams?.path}>
             <span>{displayTitle}</span>
-            <label className="change-btn">
+            <button
+              type="button"
+              className="copy-link-btn"
+              onClick={handleCopyCurrentLink}
+            >
+              生成当前位置的视频链接
+            </button>
+            <button type="button" className="change-btn" onClick={handleOpenVideoDialog}>
               更换
-              <input
-                type="file"
-                accept="video/*"
-                hidden
-                onChange={handleFileSelect}
-              />
-            </label>
+            </button>
           </div>
+          {toast && <div className="toast">{toast}</div>}
         </>
       ) : (
         <div className="drop-zone">
@@ -220,15 +289,9 @@ function App() {
             <div className="icon">▶</div>
             <p className="title">Graph Video Player</p>
             <p className="desc">拖拽视频文件到此处播放</p>
-            <label className="file-btn">
+            <button type="button" className="file-btn" onClick={handleOpenVideoDialog}>
               选择文件
-              <input
-                type="file"
-                accept="video/*"
-                hidden
-                onChange={handleFileSelect}
-              />
-            </label>
+            </button>
             <p className="hint">或通过 graph-video:///path/to/video?t=90 协议唤起</p>
           </div>
         </div>

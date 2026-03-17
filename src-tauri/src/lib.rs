@@ -45,12 +45,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("video-src", |_app, request| {
             use tauri::http::{Response, StatusCode};
 
-            // Decode path: video-src://localhost/Users/foo/bar.mp4
+            // Decode path: video-src://localhost/Users/foo/bar.mp4 或 /D:/Desktop/foo.mp4
             let raw_path = request.uri().path();
-            let file_path = percent_decode(raw_path);
+            let mut file_path = percent_decode(raw_path);
+            // Windows 路径在 URL 中为 /D:/...，需去掉前导 / 才能正确打开
+            if file_path.len() >= 3
+                && file_path.starts_with('/')
+                && file_path.as_bytes()[1].is_ascii_alphabetic()
+                && file_path.as_bytes()[2] == b':'
+            {
+                file_path = file_path[1..].to_string();
+            }
 
             let mut file = match File::open(&file_path) {
                 Ok(f) => f,
