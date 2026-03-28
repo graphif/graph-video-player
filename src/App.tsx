@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 interface VideoParams {
@@ -119,6 +121,50 @@ function parseGraphVideoUrl(url: string): VideoParams | null {
   }
 }
 
+function formatSecondsForUrl(t: number): string {
+  const s = t.toFixed(3);
+  return s.replace(/\.?0+$/, "");
+}
+
+function encodeGraphVideoPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return encodeURI(normalized).replace(/#/g, "%23").replace(/\?/g, "%3F");
+}
+
+function buildGraphVideoUrl(path: string, params?: { t?: number }): string | null {
+  const normalized = path.replace(/\\/g, "/");
+  const isWindowsAbs = /^[A-Za-z]:\//.test(normalized);
+  const isUnixAbs = normalized.startsWith("/");
+  if (!isWindowsAbs && !isUnixAbs) return null;
+
+  const encodedPath = encodeGraphVideoPath(normalized);
+  const base = isWindowsAbs ? `graph-video:///${encodedPath}` : `graph-video://${encodedPath}`;
+
+  const query = new URLSearchParams();
+  if (params?.t !== undefined) query.set("t", formatSecondsForUrl(params.t));
+  const qs = query.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+async function writeToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "true");
+  el.style.position = "fixed";
+  el.style.top = "-1000px";
+  el.style.left = "-1000px";
+  document.body.appendChild(el);
+  el.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(el);
+  if (!ok) throw new Error("copy failed");
+}
+
 /**
  * 通过后端 HTTP 流获取视频 URL。在 Windows 上自定义协议 video-src:// 无法用于 <video src>（ERR_UNKNOWN_URL_SCHEME），
  * 故统一用本地 HTTP 服务提供视频流，各平台均可正常播放与 seek。
@@ -131,7 +177,9 @@ function App() {
   const [videoSrc, setVideoSrc] = useState<string>("");
   const [videoParams, setVideoParams] = useState<VideoParams | null>(null);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
+  const [copyLinkText, setCopyLinkText] = useState<string>("复制此刻链接");
   const videoRef = useRef<HTMLVideoElement>(null);
+  const isTauri = Boolean((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
 
   const playParams = (params: VideoParams) => {
     setVideoLoadError(null);
@@ -187,8 +235,22 @@ function App() {
       unlisten = fn;
     });
 
+    let unlistenFileDrop: (() => void) | null = null;
+    if (isTauri) {
+      listen<any>("tauri://file-drop", (event) => {
+        const payload = (event as any)?.payload;
+        const path = Array.isArray(payload) ? payload[0] : payload;
+        if (typeof path === "string" && path) playParams({ path });
+      })
+        .then((fn) => {
+          unlistenFileDrop = fn;
+        })
+        .catch(() => {});
+    }
+
     return () => {
       unlisten?.();
+      unlistenFileDrop?.();
     };
   }, []);
 
@@ -215,17 +277,58 @@ function App() {
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    if (isTauri) return;
     const file = e.dataTransfer.files[0];
     if (file) playFile(file);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isTauri) return;
     const file = e.target.files?.[0];
     if (file) playFile(file);
     e.target.value = "";
   };
 
   const displayTitle = videoParams?.title ?? videoParams?.path ?? "";
+
+  const handleChooseVideo = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          {
+            name: "Video",
+            extensions: ["mp4", "m4v", "webm", "mkv", "avi", "mov", "ts", "flv"],
+          },
+        ],
+      });
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (typeof path === "string" && path) playParams({ path });
+    } catch {}
+  };
+
+  const handleCopyLink = async () => {
+    const video = videoRef.current;
+    const path = videoParams?.path;
+    if (!video || !path) return;
+
+    const t = Math.max(0, Number(video.currentTime.toFixed(3)));
+    const url = buildGraphVideoUrl(path, { t });
+    if (!url) {
+      setCopyLinkText("无法生成");
+      window.setTimeout(() => setCopyLinkText("复制此刻链接"), 1200);
+      return;
+    }
+
+    try {
+      await writeToClipboard(url);
+      setCopyLinkText("已复制");
+    } catch {
+      setCopyLinkText("复制失败");
+    } finally {
+      window.setTimeout(() => setCopyLinkText("复制此刻链接"), 1200);
+    }
+  };
 
   return (
     <div
@@ -252,15 +355,29 @@ function App() {
           )}
           <div className="video-path" title={videoParams?.path}>
             <span>{displayTitle}</span>
-            <label className="change-btn">
-              更换
-              <input
-                type="file"
-                accept="video/*"
-                hidden
-                onChange={handleFileSelect}
-              />
-            </label>
+            <button
+              type="button"
+              className="change-btn"
+              onClick={handleCopyLink}
+              disabled={!videoParams?.path}
+            >
+              {copyLinkText}
+            </button>
+            {isTauri ? (
+              <button type="button" className="change-btn" onClick={handleChooseVideo}>
+                更换
+              </button>
+            ) : (
+              <label className="change-btn">
+                更换
+                <input
+                  type="file"
+                  accept="video/*"
+                  hidden
+                  onChange={handleFileSelect}
+                />
+              </label>
+            )}
           </div>
         </>
       ) : (
@@ -269,15 +386,21 @@ function App() {
             <div className="icon">▶</div>
             <p className="title">Graph Video Player</p>
             <p className="desc">拖拽视频文件到此处播放</p>
-            <label className="file-btn">
-              选择文件
-              <input
-                type="file"
-                accept="video/*"
-                hidden
-                onChange={handleFileSelect}
-              />
-            </label>
+            {isTauri ? (
+              <button type="button" className="file-btn" onClick={handleChooseVideo}>
+                选择文件
+              </button>
+            ) : (
+              <label className="file-btn">
+                选择文件
+                <input
+                  type="file"
+                  accept="video/*"
+                  hidden
+                  onChange={handleFileSelect}
+                />
+              </label>
+            )}
             <p className="hint">或通过 graph-video:///path/to/video?t=90 协议唤起</p>
           </div>
         </div>
@@ -287,4 +410,3 @@ function App() {
 }
 
 export default App;
-

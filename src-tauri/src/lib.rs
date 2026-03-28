@@ -223,6 +223,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .register_uri_scheme_protocol("video-src", |_app, request| {
